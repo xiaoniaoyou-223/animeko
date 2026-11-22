@@ -1,7 +1,7 @@
 name: ios14-build
 
 # Builds an UNSIGNED .ipa of Animeko with the iOS deployment target lowered to 14.0.
-# Lowering the target is the whole point: Xcode then embeds the back-deployed
+# Lowering the target is the point: Xcode then embeds the back-deployed
 # libswift_Concurrency.dylib into Animeko.app/Frameworks, which iOS 14.x does not
 # ship in /usr/lib/swift. Signing happens later on Windows with Sideloadly.
 
@@ -18,29 +18,28 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Set up JDK 21
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '21'
-          architecture: aarch64
+      - name: Install JetBrains Runtime 21 (the required toolchain vendor)
+        run: |
+          set -euo pipefail
+          URL="https://cache-redirector.jetbrains.com/intellij-jbr/jbrsdk_jcef-21.0.11-osx-aarch64-b1163.116.tar.gz"
+          mkdir -p "$RUNNER_TEMP/jbr"
+          curl -fL --retry 3 --retry-delay 2 -o "$RUNNER_TEMP/jbr.tar.gz" "$URL"
+          tar -xzf "$RUNNER_TEMP/jbr.tar.gz" -C "$RUNNER_TEMP/jbr"
+          HOME_DIR="$(find "$RUNNER_TEMP/jbr" -maxdepth 5 -type d -name Home -path '*Contents*' | head -1)"
+          if [ -z "${HOME_DIR:-}" ]; then
+            echo "JBR layout not recognised:"; find "$RUNNER_TEMP/jbr" -maxdepth 3
+            exit 1
+          fi
+          echo "JAVA_HOME=$HOME_DIR" >> "$GITHUB_ENV"
+          echo "JBR_HOME=$HOME_DIR" >> "$GITHUB_ENV"
+          echo "$HOME_DIR/bin" >> "$GITHUB_PATH"
+          "$HOME_DIR/bin/java" -version
 
-      - name: Fix JAVA_HOME and verify toolchain
+      - name: Verify toolchain
         run: |
           set -uo pipefail
-          if [ ! -x "${JAVA_HOME:-/nonexistent}/bin/java" ]; then
-            echo "JAVA_HOME from setup-java is unusable; probing system JDKs"
-            JH="$(/usr/libexec/java_home -v 21 2>/dev/null || true)"
-            if [ -z "$JH" ]; then
-              JH="$(/usr/libexec/java_home 2>/dev/null || true)"
-            fi
-            if [ -n "$JH" ]; then
-              export JAVA_HOME="$JH"
-              echo "JAVA_HOME=$JH" >> "$GITHUB_ENV"
-            fi
-          fi
           echo "JAVA_HOME=$JAVA_HOME"
-          "$JAVA_HOME/bin/java" -version
+          java -version
           chmod +x ./gradlew
           ./gradlew --version
           xcodebuild -version
@@ -63,11 +62,13 @@ jobs:
       - name: Configure Gradle for the runner
         run: |
           set -euo pipefail
-          touch local.properties
+          echo "jvm.toolchain.version=21" >> local.properties
           echo "ani.enable.ios=true" >> local.properties
           echo "kotlin.native.ignoreDisabledTargets=true" >> local.properties
+          echo "org.gradle.java.installations.paths=$JBR_HOME" >> gradle.properties
           echo "org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g" >> gradle.properties
           echo "kotlin.daemon.jvmargs=-Xmx3g" >> gradle.properties
+          echo "--- local.properties ---"; cat local.properties
 
       - name: Compile Kotlin (common + desktop)
         run: ./gradlew compileKotlin compileCommonMainKotlinMetadata --no-configuration-cache --stacktrace
