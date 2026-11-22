@@ -23,13 +23,28 @@ jobs:
         with:
           distribution: temurin
           java-version: '21'
+          architecture: aarch64
 
-      - name: Show toolchain versions
+      - name: Fix JAVA_HOME and verify toolchain
         run: |
+          set -uo pipefail
+          if [ ! -x "${JAVA_HOME:-/nonexistent}/bin/java" ]; then
+            echo "JAVA_HOME from setup-java is unusable; probing system JDKs"
+            JH="$(/usr/libexec/java_home -v 21 2>/dev/null || true)"
+            if [ -z "$JH" ]; then
+              JH="$(/usr/libexec/java_home 2>/dev/null || true)"
+            fi
+            if [ -n "$JH" ]; then
+              export JAVA_HOME="$JH"
+              echo "JAVA_HOME=$JH" >> "$GITHUB_ENV"
+            fi
+          fi
+          echo "JAVA_HOME=$JAVA_HOME"
+          "$JAVA_HOME/bin/java" -version
+          chmod +x ./gradlew
+          ./gradlew --version
           xcodebuild -version
-          xcode-select -p
-          java -version
-          pod --version
+          pod --version || true
 
       - name: Free disk space
         run: bash ./ci-helper/free-space-macos.sh || true
@@ -42,10 +57,10 @@ jobs:
             app/ios/Animeko.xcodeproj/project.pbxproj
           echo "--- Podfile ---"
           grep -n "platform :ios" app/ios/Podfile
-          echo "--- pbxproj (expect 4) ---"
+          echo "--- pbxproj occurrences of 14.0 (expect 4) ---"
           grep -c "IPHONEOS_DEPLOYMENT_TARGET = 14.0" app/ios/Animeko.xcodeproj/project.pbxproj
 
-      - name: Configure Gradle for a 7 GB runner
+      - name: Configure Gradle for the runner
         run: |
           set -euo pipefail
           touch local.properties
@@ -53,12 +68,9 @@ jobs:
           echo "kotlin.native.ignoreDisabledTargets=true" >> local.properties
           echo "org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g" >> gradle.properties
           echo "kotlin.daemon.jvmargs=-Xmx3g" >> gradle.properties
-          echo "org.gradle.daemon.idletimeout=60000" >> gradle.properties
 
       - name: Compile Kotlin (common + desktop)
-        run: >
-          ./gradlew compileKotlin compileCommonMainKotlinMetadata
-          --no-configuration-cache --parallel --stacktrace
+        run: ./gradlew compileKotlin compileCommonMainKotlinMetadata --no-configuration-cache --stacktrace
 
       - name: Generate dummy framework
         run: ./gradlew :app:shared:application:generateDummyFramework --no-configuration-cache --stacktrace
