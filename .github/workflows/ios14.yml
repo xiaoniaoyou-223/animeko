@@ -38,26 +38,26 @@ jobs:
       - name: Verify toolchain
         run: |
           set -uo pipefail
-          echo "JAVA_HOME=$JAVA_HOME"
           java -version
           chmod +x ./gradlew
-          ./gradlew --version
           xcodebuild -version
           pod --version || true
 
       - name: Free disk space
         run: bash ./ci-helper/free-space-macos.sh || true
 
-      - name: Lower iOS deployment target to 14.0
+      - name: Lower deployment target to 14.0 (Podfile, Xcode project, Kotlin pods DSL)
         run: |
           set -euo pipefail
           sed -i '' "s/platform :ios, '16.0'/platform :ios, '14.0'/" app/ios/Podfile
           sed -i '' "s/IPHONEOS_DEPLOYMENT_TARGET = 16.0/IPHONEOS_DEPLOYMENT_TARGET = 14.0/g" \
             app/ios/Animeko.xcodeproj/project.pbxproj
-          echo "--- Podfile ---"
-          grep -n "platform :ios" app/ios/Podfile
-          echo "--- pbxproj occurrences of 14.0 (expect 4) ---"
-          grep -c "IPHONEOS_DEPLOYMENT_TARGET = 14.0" app/ios/Animeko.xcodeproj/project.pbxproj
+          # tell the Kotlin CocoaPods plugin what to emit in application.podspec
+          perl -0777 -pi -e 's/(extensions\.configure<CocoapodsExtension>\s*\{)/$1\n            ios.deploymentTarget = "14.0"/' \
+            app/shared/application/build.gradle.kts
+          echo "--- Podfile ---"; grep -n "platform :ios" app/ios/Podfile
+          echo "--- pbxproj ---"; grep -c "IPHONEOS_DEPLOYMENT_TARGET = 14.0" app/ios/Animeko.xcodeproj/project.pbxproj
+          echo "--- cocoapods DSL ---"; grep -n "deploymentTarget" app/shared/application/build.gradle.kts
 
       - name: Configure Gradle for the runner
         run: |
@@ -68,7 +68,6 @@ jobs:
           echo "org.gradle.java.installations.paths=$JBR_HOME" >> gradle.properties
           echo "org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g" >> gradle.properties
           echo "kotlin.daemon.jvmargs=-Xmx3g" >> gradle.properties
-          echo "--- local.properties ---"; cat local.properties
 
       - name: Compile Kotlin (common + desktop)
         run: ./gradlew compileKotlin compileCommonMainKotlinMetadata --no-configuration-cache --stacktrace
@@ -76,8 +75,22 @@ jobs:
       - name: Generate dummy framework
         run: ./gradlew :app:shared:application:generateDummyFramework --no-configuration-cache --stacktrace
 
+      - name: Generate podspec and inspect platform
+        run: |
+          set -euo pipefail
+          ./gradlew :app:shared:application:podspec --no-configuration-cache --stacktrace
+          echo "--- generated podspecs ---"
+          find . -name '*.podspec' -not -path './Pods/*' -print || true
+          find . -name '*.podspec' -not -path './Pods/*' -exec grep -Hn "platform" {} \; || true
+
+      - name: Force podspec platform to 14.0 (belt and braces)
+        run: |
+          set -euo pipefail
+          find . -name '*.podspec' -not -path './Pods/*' -exec perl -pi -e "s/s\.platform\s*=\s*:ios,\s*'[0-9.]+'/s.platform = :ios, '14.0'/" {} \;
+          find . -name '*.podspec' -not -path './Pods/*' -exec grep -Hn "platform" {} \; || true
+
       - name: Pod install
-        run: ./gradlew :app:ios:podInstall --no-configuration-cache --stacktrace
+        run: ./gradlew :app:ios:podInstall -x :app:shared:application:podspec --no-configuration-cache --stacktrace
 
       - name: Patch Info.plist
         run: ./gradlew :app:ios:patchInfoPlist --no-configuration-cache --stacktrace
@@ -90,6 +103,8 @@ jobs:
           IPA=app/ios/build/archives/release/Animeko.ipa
           ls -lh "$IPA"
           unzip -l "$IPA" | grep -i -E "Frameworks/|Info.plist" | head -40
+          echo "--- concurrency runtime embedded? ---"
+          unzip -l "$IPA" | grep -i concurrency || echo "NOT embedded"
 
       - name: Upload IPA
         uses: actions/upload-artifact@v4
