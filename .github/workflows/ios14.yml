@@ -78,6 +78,9 @@ jobs:
           echo "--- Podfile ---"; grep -n "platform :ios" app/ios/Podfile
           echo "--- pbxproj ---"; grep -c "IPHONEOS_DEPLOYMENT_TARGET = 14.0" app/ios/Animeko.xcodeproj/project.pbxproj
           echo "--- cocoapods DSL ---"; grep -n "deploymentTarget" app/shared/application/build.gradle.kts
+          # onnxruntime-objc 1.22.0 declares iOS 15.1; 1.19.2 declares iOS 13.0
+          sed -i '' 's/^onnxruntime = "1\.\([0-9]*\)\.[0-9]*"/onnxruntime = "1.19.2"/' gradle/libs.versions.toml
+          echo "--- onnxruntime pin ---"; grep -n '^onnxruntime' gradle/libs.versions.toml
 
       - name: Configure Gradle for the runner
         run: |
