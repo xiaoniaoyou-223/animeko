@@ -18,16 +18,10 @@ jobs:
           set -uo pipefail
           pod --version
           pod repo add-cdn trunk https://cdn.cocoapods.org/ 2>&1 || true
-          echo "===== repo list ====="
-          pod repo list 2>&1 | head -10 || true
-          echo
-          for v in 1.22.0 1.20.1 1.19.2 1.18.1 1.17.3 1.16.3; do
+          for v in 1.22.0 1.19.2; do
             echo "########## onnxruntime-objc $v ##########"
             pod spec cat onnxruntime-objc --version=$v 2>&1 | head -40 || true
-            echo
           done
-          echo "########## Sentry 8.49.0 ##########"
-          pod spec cat Sentry --version=8.49.0 2>&1 | head -30 || true
 
   build-ios14:
     if: ${{ inputs.full }}
@@ -39,7 +33,7 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Install JetBrains Runtime 21 (the required toolchain vendor)
+      - name: Install JetBrains Runtime 21 (required toolchain vendor)
         run: |
           set -euo pipefail
           URL="https://cache-redirector.jetbrains.com/intellij-jbr/jbrsdk_jcef-21.0.11-osx-aarch64-b1163.116.tar.gz"
@@ -47,10 +41,7 @@ jobs:
           curl -fL --retry 3 --retry-delay 2 -o "$RUNNER_TEMP/jbr.tar.gz" "$URL"
           tar -xzf "$RUNNER_TEMP/jbr.tar.gz" -C "$RUNNER_TEMP/jbr"
           HOME_DIR="$(find "$RUNNER_TEMP/jbr" -maxdepth 5 -type d -name Home -path '*Contents*' | head -1)"
-          if [ -z "${HOME_DIR:-}" ]; then
-            echo "JBR layout not recognised:"; find "$RUNNER_TEMP/jbr" -maxdepth 3
-            exit 1
-          fi
+          if [ -z "${HOME_DIR:-}" ]; then echo "JBR not found"; exit 1; fi
           echo "JAVA_HOME=$HOME_DIR" >> "$GITHUB_ENV"
           echo "JBR_HOME=$HOME_DIR" >> "$GITHUB_ENV"
           echo "$HOME_DIR/bin" >> "$GITHUB_PATH"
@@ -67,20 +58,17 @@ jobs:
       - name: Free disk space
         run: bash ./ci-helper/free-space-macos.sh || true
 
-      - name: Lower deployment target to 14.0 (Podfile, Xcode project, Kotlin pods DSL)
+      - name: Lower deployment target to 14.0 and pin onnxruntime
         run: |
           set -euo pipefail
           sed -i '' "s/platform :ios, '16.0'/platform :ios, '14.0'/" app/ios/Podfile
           sed -i '' "s/IPHONEOS_DEPLOYMENT_TARGET = 16.0/IPHONEOS_DEPLOYMENT_TARGET = 14.0/g" \
             app/ios/Animeko.xcodeproj/project.pbxproj
-          perl -0777 -pi -e 's/(extensions\.configure<CocoapodsExtension>\s*\{)/$1\n            ios.deploymentTarget = "14.0"/' \
-            app/shared/application/build.gradle.kts
-          echo "--- Podfile ---"; grep -n "platform :ios" app/ios/Podfile
-          echo "--- pbxproj ---"; grep -c "IPHONEOS_DEPLOYMENT_TARGET = 14.0" app/ios/Animeko.xcodeproj/project.pbxproj
-          echo "--- cocoapods DSL ---"; grep -n "deploymentTarget" app/shared/application/build.gradle.kts
           # onnxruntime-objc 1.22.0 declares iOS 15.1; 1.19.2 declares iOS 13.0
-          sed -i '' 's/^onnxruntime = "1\.\([0-9]*\)\.[0-9]*"/onnxruntime = "1.19.2"/' gradle/libs.versions.toml
-          echo "--- onnxruntime pin ---"; grep -n '^onnxruntime' gradle/libs.versions.toml
+          sed -i '' 's/^onnxruntime = "1\.[0-9.]*"/onnxruntime = "1.19.2"/' gradle/libs.versions.toml
+          echo "--- Podfile ---";   grep -n "platform :ios" app/ios/Podfile
+          echo "--- pbxproj ---";   grep -c "IPHONEOS_DEPLOYMENT_TARGET = 14.0" app/ios/Animeko.xcodeproj/project.pbxproj
+          echo "--- onnxruntime ---"; grep -n '^onnxruntime' gradle/libs.versions.toml
 
       - name: Configure Gradle for the runner
         run: |
@@ -98,29 +86,28 @@ jobs:
       - name: Generate dummy framework
         run: ./gradlew :app:shared:application:generateDummyFramework --no-configuration-cache --stacktrace
 
-      - name: Generate podspec and dump it
+      - name: Generate podspec, patch it and vendor a fixed copy
         run: |
           set -euo pipefail
           ./gradlew :app:shared:application:podspec --no-configuration-cache --stacktrace
-          echo "===== generated podspec ====="
-          cat app/shared/application/application.podspec || true
+          SRC=app/shared/application/application.podspec
+          DST=app/shared/application/application-fixed.podspec
+          cp "$SRC" "$DST"
+          # receiver-agnostic patch: matches spec.ios.deployment_target and s.ios.deployment_target
+          sed -i '' -E "s/(ios\.deployment_target[[:space:]]*=[[:space:]]*)'[0-9.]+'/\1'14.0'/" "$DST"
+          echo "--- fixed podspec platform ---"
+          grep -n "deployment_target" "$DST" || true
+          grep -q "ios.deployment_target.*'14.0'" "$DST" || { echo "FATAL: podspec patch failed"; exit 1; }
+          # point the Podfile at the patched copy so Gradle's regeneration cannot undo it
+          sed -i '' "s|pod 'application', :path => '../shared/application'|pod 'application', :podspec => '../shared/application/application-fixed.podspec'|" app/ios/Podfile
+          echo "--- Podfile pod line ---"
+          grep -n "pod 'application'" app/ios/Podfile
 
-      - name: Force podspec deployment target to 14.0
-        run: |
-          set -euo pipefail
-          F=app/shared/application/application.podspec
-          # receiver-agnostic: matches spec.ios.deployment_target / s.ios.deployment_target alike
-          sed -i '' -E "s/(ios\.deployment_target[[:space:]]*=[[:space:]]*)'[0-9.]+'/\1'14.0'/" "$F"
-          sed -i '' -E "s/(\.platform[[:space:]]*=[[:space:]]*:ios,[[:space:]]*)'[0-9.]+'/\1'14.0'/" "$F"
-          echo "--- patched podspec lines ---"
-          grep -nE "deployment_target|\.platform" "$F" || true
-          grep -q "ios.deployment_target.*'14.0'" "$F" || { echo \"FATAL: podspec deployment target was not patched\"; exit 1; }
-
-      - name: Pod install (verbose on failure)
+      - name: Pod install
         run: |
           set -uo pipefail
-          if ! ./gradlew :app:ios:podInstall -x :app:shared:application:podspec --no-configuration-cache --stacktrace; then
-            echo "===== retrying with verbose pod output for diagnosis ====="
+          if ! ./gradlew :app:ios:podInstall --no-configuration-cache --stacktrace; then
+            echo "===== verbose pod output for diagnosis ====="
             ( cd app/ios && pod install --verbose 2>&1 | tail -120 ) || true
             exit 1
           fi
