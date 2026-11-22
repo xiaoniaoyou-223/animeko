@@ -17,6 +17,7 @@ jobs:
         run: |
           set -uo pipefail
           pod --version
+          pod repo add-cdn trunk https://cdn.cocoapods.org/ 2>&1 || true
           echo "===== repo list ====="
           pod repo list 2>&1 | head -10 || true
           echo
