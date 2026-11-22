@@ -1,0 +1,87 @@
+name: ios14-build
+
+# Builds an UNSIGNED .ipa of Animeko with the iOS deployment target lowered to 14.0.
+# Lowering the target is the whole point: Xcode then embeds the back-deployed
+# libswift_Concurrency.dylib into Animeko.app/Frameworks, which iOS 14.x does not
+# ship in /usr/lib/swift. Signing happens later on Windows with Sideloadly.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-ios14:
+    runs-on: macos-15
+    timeout-minutes: 300
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Show toolchain versions
+        run: |
+          xcodebuild -version
+          xcode-select -p
+          java -version
+          pod --version
+
+      - name: Free disk space
+        run: bash ./ci-helper/free-space-macos.sh || true
+
+      - name: Lower iOS deployment target to 14.0
+        run: |
+          set -euo pipefail
+          sed -i '' "s/platform :ios, '16.0'/platform :ios, '14.0'/" app/ios/Podfile
+          sed -i '' "s/IPHONEOS_DEPLOYMENT_TARGET = 16.0/IPHONEOS_DEPLOYMENT_TARGET = 14.0/g" \
+            app/ios/Animeko.xcodeproj/project.pbxproj
+          echo "--- Podfile ---"
+          grep -n "platform :ios" app/ios/Podfile
+          echo "--- pbxproj (expect 4) ---"
+          grep -c "IPHONEOS_DEPLOYMENT_TARGET = 14.0" app/ios/Animeko.xcodeproj/project.pbxproj
+
+      - name: Configure Gradle for a 7 GB runner
+        run: |
+          set -euo pipefail
+          touch local.properties
+          echo "ani.enable.ios=true" >> local.properties
+          echo "kotlin.native.ignoreDisabledTargets=true" >> local.properties
+          echo "org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g" >> gradle.properties
+          echo "kotlin.daemon.jvmargs=-Xmx3g" >> gradle.properties
+          echo "org.gradle.daemon.idletimeout=60000" >> gradle.properties
+
+      - name: Compile Kotlin (common + desktop)
+        run: >
+          ./gradlew compileKotlin compileCommonMainKotlinMetadata
+          --no-configuration-cache --parallel --stacktrace
+
+      - name: Generate dummy framework
+        run: ./gradlew :app:shared:application:generateDummyFramework --no-configuration-cache --stacktrace
+
+      - name: Pod install
+        run: ./gradlew :app:ios:podInstall --no-configuration-cache --stacktrace
+
+      - name: Patch Info.plist
+        run: ./gradlew :app:ios:patchInfoPlist --no-configuration-cache --stacktrace
+
+      - name: Build unsigned IPA
+        run: ./gradlew :app:ios:buildReleaseIpa --no-configuration-cache --stacktrace
+
+      - name: Report IPA contents
+        run: |
+          IPA=app/ios/build/archives/release/Animeko.ipa
+          ls -lh "$IPA"
+          unzip -l "$IPA" | grep -i -E "Frameworks/|Info.plist" | head -40
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: ani-ios14-ipa
+          path: app/ios/build/archives/release/Animeko.ipa
+          if-no-files-found: error
+          retention-days: 7
