@@ -105,11 +105,16 @@ jobs:
           echo "===== generated podspec ====="
           cat app/shared/application/application.podspec || true
 
-      - name: Force podspec platform to 14.0
+      - name: Force podspec deployment target to 14.0
         run: |
           set -euo pipefail
-          perl -pi -e "s/s\.platform\s*=\s*:ios,\s*'[0-9.]+'/s.platform = :ios, '14.0'/; s/s\.ios\.deployment_target\s*=\s*'[0-9.]+'/s.ios.deployment_target = '14.0'/" app/shared/application/application.podspec
-          grep -nE "platform|deployment_target" app/shared/application/application.podspec || true
+          F=app/shared/application/application.podspec
+          # receiver-agnostic: matches spec.ios.deployment_target / s.ios.deployment_target alike
+          sed -i '' -E "s/(ios\.deployment_target[[:space:]]*=[[:space:]]*)'[0-9.]+'/\1'14.0'/" "$F"
+          sed -i '' -E "s/(\.platform[[:space:]]*=[[:space:]]*:ios,[[:space:]]*)'[0-9.]+'/\1'14.0'/" "$F"
+          echo "--- patched podspec lines ---"
+          grep -nE "deployment_target|\.platform" "$F" || true
+          grep -q "ios.deployment_target.*'14.0'" "$F" || { echo \"FATAL: podspec deployment target was not patched\"; exit 1; }
 
       - name: Pod install (verbose on failure)
         run: |
