@@ -1,5 +1,12 @@
 name: ios14-build
 
+# Builds an UNSIGNED .ipa of Animeko whose **app target** deployment target is 14.0.
+# Only the Xcode project is touched: Podfile and pod versions stay upstream, so
+# CocoaPods resolution and the Gradle cinterop chain behave exactly as upstream.
+# With IPHONEOS_DEPLOYMENT_TARGET < 15.0 the Swift toolchain back-deploys and
+# embeds libswift_Concurrency.dylib into Animeko.app/Frameworks, which iOS 14.x
+# does not provide in /usr/lib/swift.
+
 on:
   workflow_dispatch:
     inputs:
@@ -9,20 +16,6 @@ on:
         default: true
 
 jobs:
-  diagnose-pods:
-    runs-on: macos-15
-    timeout-minutes: 25
-    steps:
-      - name: Report pod platform requirements
-        run: |
-          set -uo pipefail
-          pod --version
-          pod repo add-cdn trunk https://cdn.cocoapods.org/ 2>&1 || true
-          for v in 1.22.0 1.19.2; do
-            echo "########## onnxruntime-objc $v ##########"
-            pod spec cat onnxruntime-objc --version=$v 2>&1 | head -40 || true
-          done
-
   build-ios14:
     if: ${{ inputs.full }}
     runs-on: macos-15
@@ -58,17 +51,16 @@ jobs:
       - name: Free disk space
         run: bash ./ci-helper/free-space-macos.sh || true
 
-      - name: Lower deployment target to 14.0 and pin onnxruntime
+      - name: Lower ONLY the app target deployment target to 14.0
         run: |
           set -euo pipefail
-          sed -i '' "s/platform :ios, '16.0'/platform :ios, '14.0'/" app/ios/Podfile
-          sed -i '' "s/IPHONEOS_DEPLOYMENT_TARGET = 16.0/IPHONEOS_DEPLOYMENT_TARGET = 14.0/g" \
-            app/ios/Animeko.xcodeproj/project.pbxproj
-          # onnxruntime-objc 1.22.0 declares iOS 15.1; 1.19.2 declares iOS 13.0
-          sed -i '' 's/^onnxruntime = "1\.[0-9.]*"/onnxruntime = "1.19.2"/' gradle/libs.versions.toml
-          echo "--- Podfile ---";   grep -n "platform :ios" app/ios/Podfile
-          echo "--- pbxproj ---";   grep -c "IPHONEOS_DEPLOYMENT_TARGET = 14.0" app/ios/Animeko.xcodeproj/project.pbxproj
-          echo "--- onnxruntime ---"; grep -n '^onnxruntime' gradle/libs.versions.toml
+          PBX=app/ios/Animeko.xcodeproj/project.pbxproj
+          echo "--- before ---"; grep -c "IPHONEOS_DEPLOYMENT_TARGET = 16.0" "$PBX" || true
+          sed -i '' "s/IPHONEOS_DEPLOYMENT_TARGET = 16.0/IPHONEOS_DEPLOYMENT_TARGET = 14.0/g" "$PBX"
+          echo "--- after (expect 0) ---"; grep -c "IPHONEOS_DEPLOYMENT_TARGET = 16.0" "$PBX" || true
+          echo "--- new value count (expect >=1) ---"; grep -c "IPHONEOS_DEPLOYMENT_TARGET = 14.0" "$PBX"
+          grep -c "IPHONEOS_DEPLOYMENT_TARGET = 14.0" "$PBX" | grep -qv '^0$' || { echo "FATAL: pbxproj patch failed"; exit 1; }
+          echo "--- Podfile untouched ---"; grep -n "platform :ios" app/ios/Podfile
 
       - name: Configure Gradle for the runner
         run: |
@@ -86,28 +78,11 @@ jobs:
       - name: Generate dummy framework
         run: ./gradlew :app:shared:application:generateDummyFramework --no-configuration-cache --stacktrace
 
-      - name: Generate podspec, patch it and vendor a fixed copy
-        run: |
-          set -euo pipefail
-          ./gradlew :app:shared:application:podspec --no-configuration-cache --stacktrace
-          SRC=app/shared/application/application.podspec
-          DST=app/shared/application/application-fixed.podspec
-          cp "$SRC" "$DST"
-          # receiver-agnostic patch: matches spec.ios.deployment_target and s.ios.deployment_target
-          sed -i '' -E "s/(ios\.deployment_target[[:space:]]*=[[:space:]]*)'[0-9.]+'/\1'14.0'/" "$DST"
-          echo "--- fixed podspec platform ---"
-          grep -n "deployment_target" "$DST" || true
-          grep -q "ios.deployment_target.*'14.0'" "$DST" || { echo "FATAL: podspec patch failed"; exit 1; }
-          # point the Podfile at the patched copy so Gradle's regeneration cannot undo it
-          sed -i '' "s|pod 'application', :path => '../shared/application'|pod 'application', :podspec => '../shared/application/application-fixed.podspec'|" app/ios/Podfile
-          echo "--- Podfile pod line ---"
-          grep -n "pod 'application'" app/ios/Podfile
-
-      - name: Pod install
+      - name: Pod install (upstream podspec, untouched)
         run: |
           set -uo pipefail
           if ! ./gradlew :app:ios:podInstall --no-configuration-cache --stacktrace; then
-            echo "===== verbose pod output for diagnosis ====="
+            echo "===== verbose pod output ====="
             ( cd app/ios && pod install --verbose 2>&1 | tail -120 ) || true
             exit 1
           fi
@@ -122,7 +97,10 @@ jobs:
         run: |
           IPA=app/ios/build/archives/release/Animeko.ipa
           ls -lh "$IPA"
-          unzip -l "$IPA" | grep -i -E "Frameworks/|Info.plist" | head -40
+          echo "--- app Info.plist MinimumOSVersion ---"
+          unzip -p "$IPA" 'Payload/Animeko.app/Info.plist' | plutil -p - 2>/dev/null | grep -i -E "MinimumOSVersion|CFBundleIdentifier" || true
+          echo "--- embedded frameworks ---"
+          unzip -l "$IPA" | grep -i "Frameworks/" | head -30
           echo "--- concurrency runtime embedded? ---"
           unzip -l "$IPA" | grep -i concurrency || echo "NOT embedded"
 
