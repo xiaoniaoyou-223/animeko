@@ -1,34 +1,35 @@
 name: ios14-build
 
-# Builds an UNSIGNED .ipa of Animeko with the iOS deployment target lowered to 14.0.
-# Lowering the target is the point: Xcode then embeds the back-deployed
-# libswift_Concurrency.dylib into Animeko.app/Frameworks, which iOS 14.x does not
-# ship in /usr/lib/swift. Signing happens later on Windows with Sideloadly.
-
 on:
   workflow_dispatch:
+    inputs:
+      full:
+        description: 'also run the full iOS build'
+        type: boolean
+        default: true
 
 jobs:
   diagnose-pods:
     runs-on: macos-15
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
       - name: Report pod platform requirements
         run: |
           set -uo pipefail
           pod --version
-          echo "===== onnxruntime-objc (latest) ====="
-          pod spec cat onnxruntime-objc 2>&1 | grep -E "platform|deployment_target|version" | head -20 || true
-          echo "===== onnxruntime-objc 1.17.3 ====="
-          pod spec cat onnxruntime-objc --version=1.17.3 2>&1 | grep -E "platform|deployment_target" | head -10 || true
-          echo "===== onnxruntime-objc 1.20.1 ====="
-          pod spec cat onnxruntime-objc --version=1.20.1 2>&1 | grep -E "platform|deployment_target" | head -10 || true
-          echo "===== Sentry 8.49.0 ====="
-          pod spec cat Sentry --version=8.49.0 2>&1 | grep -E "platform|deployment_target" | head -10 || true
+          echo "===== repo list ====="
+          pod repo list 2>&1 | head -10 || true
+          echo
+          for v in 1.22.0 1.20.1 1.19.2 1.18.1 1.17.3 1.16.3; do
+            echo "########## onnxruntime-objc $v ##########"
+            pod spec cat onnxruntime-objc --version=$v 2>&1 | head -40 || true
+            echo
+          done
+          echo "########## Sentry 8.49.0 ##########"
+          pod spec cat Sentry --version=8.49.0 2>&1 | head -30 || true
+
   build-ios14:
+    if: ${{ inputs.full }}
     runs-on: macos-15
     timeout-minutes: 300
     steps:
@@ -71,7 +72,6 @@ jobs:
           sed -i '' "s/platform :ios, '16.0'/platform :ios, '14.0'/" app/ios/Podfile
           sed -i '' "s/IPHONEOS_DEPLOYMENT_TARGET = 16.0/IPHONEOS_DEPLOYMENT_TARGET = 14.0/g" \
             app/ios/Animeko.xcodeproj/project.pbxproj
-          # tell the Kotlin CocoaPods plugin what to emit in application.podspec
           perl -0777 -pi -e 's/(extensions\.configure<CocoapodsExtension>\s*\{)/$1\n            ios.deploymentTarget = "14.0"/' \
             app/shared/application/build.gradle.kts
           echo "--- Podfile ---"; grep -n "platform :ios" app/ios/Podfile
@@ -94,22 +94,27 @@ jobs:
       - name: Generate dummy framework
         run: ./gradlew :app:shared:application:generateDummyFramework --no-configuration-cache --stacktrace
 
-      - name: Generate podspec and inspect platform
+      - name: Generate podspec and dump it
         run: |
           set -euo pipefail
           ./gradlew :app:shared:application:podspec --no-configuration-cache --stacktrace
-          echo "--- generated podspecs ---"
-          find . -name '*.podspec' -not -path './Pods/*' -print || true
-          find . -name '*.podspec' -not -path './Pods/*' -exec grep -Hn "platform" {} \; || true
+          echo "===== generated podspec ====="
+          cat app/shared/application/application.podspec || true
 
-      - name: Force podspec platform to 14.0 (belt and braces)
+      - name: Force podspec platform to 14.0
         run: |
           set -euo pipefail
-          find . -name '*.podspec' -not -path './Pods/*' -exec perl -pi -e "s/s\.platform\s*=\s*:ios,\s*'[0-9.]+'/s.platform = :ios, '14.0'/" {} \;
-          find . -name '*.podspec' -not -path './Pods/*' -exec grep -Hn "platform" {} \; || true
+          perl -pi -e "s/s\.platform\s*=\s*:ios,\s*'[0-9.]+'/s.platform = :ios, '14.0'/; s/s\.ios\.deployment_target\s*=\s*'[0-9.]+'/s.ios.deployment_target = '14.0'/" app/shared/application/application.podspec
+          grep -nE "platform|deployment_target" app/shared/application/application.podspec || true
 
-      - name: Pod install
-        run: ./gradlew :app:ios:podInstall -x :app:shared:application:podspec --no-configuration-cache --stacktrace
+      - name: Pod install (verbose on failure)
+        run: |
+          set -uo pipefail
+          if ! ./gradlew :app:ios:podInstall -x :app:shared:application:podspec --no-configuration-cache --stacktrace; then
+            echo "===== retrying with verbose pod output for diagnosis ====="
+            ( cd app/ios && pod install --verbose 2>&1 | tail -120 ) || true
+            exit 1
+          fi
 
       - name: Patch Info.plist
         run: ./gradlew :app:ios:patchInfoPlist --no-configuration-cache --stacktrace
