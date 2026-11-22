@@ -9,6 +9,25 @@ on:
   workflow_dispatch:
 
 jobs:
+  diagnose-pods:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Report pod platform requirements
+        run: |
+          set -uo pipefail
+          pod --version
+          echo "===== onnxruntime-objc (latest) ====="
+          pod spec cat onnxruntime-objc 2>&1 | grep -E "platform|deployment_target|version" | head -20 || true
+          echo "===== onnxruntime-objc 1.17.3 ====="
+          pod spec cat onnxruntime-objc --version=1.17.3 2>&1 | grep -E "platform|deployment_target" | head -10 || true
+          echo "===== onnxruntime-objc 1.20.1 ====="
+          pod spec cat onnxruntime-objc --version=1.20.1 2>&1 | grep -E "platform|deployment_target" | head -10 || true
+          echo "===== Sentry 8.49.0 ====="
+          pod spec cat Sentry --version=8.49.0 2>&1 | grep -E "platform|deployment_target" | head -10 || true
   build-ios14:
     runs-on: macos-15
     timeout-minutes: 300
